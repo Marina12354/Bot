@@ -1,118 +1,135 @@
-from datetime import date
-
 import vk_api
+from vk_api import ApiError
 from vk_api.longpoll import VkLongPoll, VkEventType
 
 import group_methods
 import tdatabase
-
+from config import access_token
 
 vk_session_personal = vk_api.VkApi(
-    token='#личный токен')
+    token=access_token)
 vk_personal = vk_session_personal.get_api()
 longpoll_personal = VkLongPoll(vk_session_personal)
 
 
-def photos_get(user_id):
-    photos = vk_session_personal.method('photos.get',
-                                        {'album_id': 'profile',
-                                         'owner_id': user_id,
-                                         'extended': 1
-                                         }
-                                        )
+class User_info():
+    def __init__(self):
+        self.bdate = None
+        self.sex = None
+        self.relation = None
+        self.city = None
+        self.first_name = ""
+        self.last_name = ""
 
-    photo_map = {}
-    for photo in photos['items']:
-        photo_id = 'photo' + str(photo['owner_id']) + '_' + str(photo['id'])
-        photo_map[photo_id] = photo['likes']['count'] + photo['comments']['count']
+        self.user_id = 0
+        self.user_age = 0
+        self.user_sex_id = 0
+        self.user_relation_id = 0
+        self.user_city_id = 0
 
-    sorted_photo_map = sorted(photo_map.items(), key=lambda x: -x[1])
-    dict(sorted_photo_map)
-    photo_map = sorted_photo_map[:3]
+    def get_profile_info(self, event_name, user_id):
+        info, = vk_session_personal.method('users.get',
+                                           {"user_id": user_id,
+                                            'fields': 'bdate, sex, relation, city'
+                                            })
+        self.bdate = info['bdate'] if 'bdate' in info else None
+        self.sex = info['sex'] if 'sex' in info else None
+        self.relation = info['relation'] if 'relation' in info else None
+        self.city = info['city'] if 'city' in info else None
+        self.first_name = info['first_name'] if 'first_name' in info else ""
+        self.last_name = info['last_name'] if 'last_name' in info else ""
 
-    return photo_map
-
-
-def get_profile_info_bdate(user_id):
-    info = vk_session_personal.method('users.get',
-                                      {"user_id": user_id,
-                                       'fields': 'bdate'
-                                       })
-    if 'bdate' in info[0]:
-        return info[0]['bdate']
-    else:
-        return "none"
-
-
-def get_profile_info_sex(user_id):
-    info = vk_session_personal.method('users.get',
-                                      {"user_id": user_id,
-                                       'fields': 'sex'
-                                       }
-                                      )
-    if 'sex' in info[0]:
-        return info[0]['sex']
-    else:
-        return "none"
+        self.user_id = user_id
+        self.user_age = group_methods.get_user_age(event_name, self.bdate)
+        self.user_sex_id = group_methods.get_user_sex_id(event_name, self.sex)
+        self.user_relation_id = group_methods.get_user_relation_id(event_name, self.relation)
+        self.user_city_id = group_methods.get_user_city_id(event_name, self.city)
 
 
-def get_profile_info_relation(user_id):
-    info = vk_session_personal.method('users.get',
-                                      {"user_id": user_id,
-                                       'fields': 'relation'
-                                       }
-                                      )
-    if 'relation' in info[0]:
-        return info[0]['relation']
-    else:
-        return "none"
+class Profiles_info():
+    profiles_data = []
+    max_users_count = 5
+    offset = 0
 
+    def show_profile_photo(self, human, event):
+        photo_map = self.photos_get(human['id'])
+        group_methods.message_send(event.user_id, 'Имя : ' +
+                                   human['name'], attachment=None)
+        group_methods.message_send(event.user_id, 'https://vk.com/id' + str(human['id']),
+                                   attachment=None)
 
-def get_profile_info_first_name(user_id):
-    info = vk_session_personal.method('users.get',
-                                      {"user_id": user_id,
-                                       'fields': 'first_name'
-                                       }
-                                      )
-    if 'first_name' in info[0]:
-        return info[0]['first_name']
-    else:
-        return ""
+        for key, value in photo_map:
+            photo = key
+            likes_comm = value
+            group_methods.message_send(event.user_id,
+                                       'Самые популярные: ' + str(likes_comm),
+                                       attachment=photo)
 
+    def start(self, user_info, event):
+        self.search_profiles(user_info)
+        while self.profiles_data:
+            profile = self.profiles_data.pop()
+            #          Пропускаем анкету
+            if self.check_user(int(user_info.user_id), int(profile['id'])):
+                print("Есть уже такая анкета")
+            #          Новую анкету вносим и показываем
+            else:
+                tdatabase.insert_data(user_info.user_id, profile['id'])
+                self.show_profile_photo(profile, event)
+                #              Выходим, если вернулось True на согласие для выхода
+                if group_methods.stopper(event):
+                    return
+            #          Ищем следующую партию
+            if not (self.profiles_data):
+                self.offset += self.max_users_count
+                self.search_profiles(user_info)
 
-def get_profile_info_last_name(user_id):
-    info = vk_session_personal.method('users.get',
-                                      {"user_id": user_id,
-                                       'fields': 'last_name'
-                                       }
-                                      )
-    if 'last_name' in info[0]:
-        return info[0]['last_name']
-    else:
-        return ""
+    def photos_get(self, user_id):
+        photos = vk_session_personal.method('photos.get',
+                                            {'album_id': 'profile',
+                                             'owner_id': user_id,
+                                             'extended': 1
+                                             }
+                                            )
+        photo_map = {}
+        for photo in photos['items']:
+            photo_id = 'photo' + str(photo['owner_id']) + '_' + str(photo['id'])
+            photo_map[photo_id] = photo['likes']['count'] + photo['comments']['count']
 
+        sorted_photo_map = sorted(photo_map.items(), key=lambda x: -x[1])
+        dict(sorted_photo_map)
+        photo_map = sorted_photo_map[:3]
+        return photo_map
 
-def get_user_age(user_id, event):
-    today = date.today()
-    user_birthday = get_profile_info_bdate(user_id)
-    if (user_birthday == "none") or (int(len(user_birthday.split('.'))) != 3):
-        group_methods.message_send(event.user_id, f"Нет года рождения. Введите возраст: ")
-        for event2 in group_methods.longpoll_group.listen():
-            if event2.type == VkEventType.MESSAGE_NEW and event2.to_me:
-                try:
-                    age = int(event2.text)
-                    if age <= 15:
-                        group_methods.message_send(event2.user_id, f"Слишком мало лет, повторите")
-                    elif age >= 100:
-                        group_methods.message_send(event2.user_id, f"Слишком много лет, повторите")
-                    else:
-                        return age
-                except ValueError:
-                    group_methods.message_send(event2.user_id, f"Ошибка ввода возраста, повторите")
-    else:
-        user_birthday_year = int(user_birthday.split('.')[2])
-        age = today.year - user_birthday_year
-        return age
+    def search_profiles(self, user_info):
+        try:
+            users = vk_session_personal.method('users.search',
+                                               {'city_id': user_info.user_city_id,
+                                                'age_from': user_info.user_age - 3,
+                                                'age_to': user_info.user_age + 3,
+                                                'sex': 2 if user_info.user_sex_id == 1 else 1,
+                                                'relation': user_info.user_relation_id,
+                                                'count': self.max_users_count,
+                                                'offset': self.offset,
+                                                'has_photo': True,
+                                                })
+        except ApiError as err:
+            users = []
+            print(f'error = {err}')
+
+        self.profiles_data = [{'name': item['first_name'] + ' ' + item['last_name'],
+                               'id': item['id']
+                               } for item in users['items'] if item['is_closed'] is False
+                              ]
+
+        return self.profiles_data
+
+    def check_user(self, user_owner_id, user_finded_id):
+        finded_persons = tdatabase.find_data(user_owner_id)
+        for person in finded_persons:
+            if int(person) == int(user_finded_id):
+                return True
+        return False
 
 
 def get_profile_info_id(search_user_name):
@@ -124,93 +141,9 @@ def get_city_id(city_name):
     city_name = vk_session_personal.method('database.getCities',
                                            {'country_id': 1, 'q': city_name, 'need_all': 0, 'count': 1})
     if city_name['count'] == 0:
-        return "none"
+        return None
     else:
         return city_name['items'][0]['id']
-
-
-def get_profile_info_city(user_id):
-    info = vk_session_personal.method('users.get',
-                                      {"user_id": user_id,
-                                       'fields': 'city'
-                                       }
-                                      )
-    if 'city' in info[0]:
-        return info[0]['city']
-    else:
-        return "none"
-
-
-def get_user_city_id(user_id, event):
-    user_city_id = get_profile_info_city(user_id)
-    if (user_city_id == "none") or user_city_id == 0:
-        group_methods.message_send(event.user_id, f"Нет поля город. Введите город: ")
-        for event4 in group_methods.longpoll_group.listen():
-            if event4.type == VkEventType.MESSAGE_NEW and event4.to_me:
-                user_city_id = get_city_id(event4.text)
-                if user_city_id != "none":
-                    return user_city_id
-                else:
-                    group_methods.message_send(event.user_id, f"Ошибка поля город. Введите город: ")
-    else:
-        return user_city_id
-
-
-def search_profiles(city_id, age, sex_id, relation_id, event5):
-    if sex_id == 1:
-        sex_id = 2
-    else:
-        sex_id = 1
-
-    profiles = vk_session_personal.method('users.search',
-                                          {'city_id': city_id,
-                                           'age_from': age,
-                                           'age_to': age,
-                                           'sex': sex_id,
-                                           'relation': relation_id,
-                                           'count': 10,
-                                           'offset': None
-                                           })
-    profiles = profiles['items']
-    for profile in profiles:
-        if not profile['is_closed']:
-            tdatabase.insert_data(profile['id'])
-
-    tdatabase.cursor.execute("SELECT * FROM users")
-    result = []
-    for person in tdatabase.cursor.fetchall():
-        first_name = get_profile_info_first_name(person[1])
-        last_name = get_profile_info_last_name(person[1])
-        result.append(
-            {'name': first_name + ' ' + last_name,
-             'id': person[1]
-             })
-
-    for human in result:
-        photo_map = photos_get(human['id'])
-        group_methods.message_send(event5.user_id, 'Имя : ' +
-                              human['name'], attachment=None)
-        group_methods.message_send(event5.user_id, 'https://vk.com/id' + str(human['id']),
-                              attachment=None)
-
-        for key, value in photo_map:
-            photo = key
-            likes_comm = value
-            group_methods.message_send(event5.user_id,
-                                  'Самые популярные: ' + str(likes_comm),
-                                  attachment=photo)
-
-        group_methods.message_send(event5.user_id, f"Для продолжения наберите '1', для прекращения наберите '2': ")
-        for event7 in group_methods.longpoll_group.listen():
-            if event7.type == VkEventType.MESSAGE_NEW and event7.to_me:
-                if event7.text.lower() == '2':
-                    return
-                elif event7.text.lower() == '1':
-                    break
-                else:
-                    group_methods.message_send(event7.user_id, f"Неизвестная команда")
-                    group_methods.message_send(event7.user_id,
-                                          f"Для продолжения наберите '1', для прекращения наберите '2': ")
 
 
 def get_data_for_search(event):
@@ -223,15 +156,10 @@ def get_data_for_search(event):
                 search_user_name = event_name.text
                 search_user_id = get_profile_info_id(search_user_name)
 
-            user_age = get_user_age(search_user_id, event_name)
-            user_sex_id = group_methods.get_user_sex_id(search_user_id, event_name)
-            user_relation_id = group_methods.get_user_relation_id(search_user_id, event_name)
-            user_city_id = get_user_city_id(search_user_id, event_name)
+            user_info = User_info()
+            user_info.get_profile_info(event_name, search_user_id)
 
-            search_profiles(user_city_id, user_age, user_sex_id, user_relation_id, event_name)
+            profiles_info = Profiles_info()
+            profiles_info.start(user_info, event_name)
 
             return
-
-
-tdatabase.drop_data()
-tdatabase.create_table_users()
